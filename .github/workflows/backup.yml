@@ -34,16 +34,13 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p 2703 103.149.177.249 >> ~/.ssh/known_hosts 2>/dev/null || true
           
-          # Setup rclone config dari secret
           echo "$RCLONE_CONFIG_DATA" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
           
-          sudo apt-get update -qq && sudo apt-get install -y zstd gnupg rsync rclone
+          sudo apt-get update -qq && sudo apt-get install -y zstd gnupg rsync rclone python3
 
       - name: Determine Target
         run: |
-          # Jika dipicu oleh jadwal CRON, default adalah 'history_only' (harian hemat bandwidth)
-          # Khusus hari Minggu (Day 7), backup 'all' (termasuk corpus mingguan)
           if [ "${{ github.event_name }}" = "schedule" ]; then
             DAY_OF_WEEK=$(date +%u)
             if [ "$DAY_OF_WEEK" -eq 7 ]; then
@@ -74,7 +71,6 @@ jobs:
             ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no zidan@103.149.177.249 \
               "python3 -c \"import sqlite3; src=sqlite3.connect('file:/home/zidan/projects/islamic-shamela-agent/data/webui_history.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/webui_snap.db'); src.backup(dst); src.close(); dst.close()\""
             
-            # Raw wire transfer (tanpa flag -z) agar mahastore 0% CPU
             rsync -e "ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no" -avP \
               zidan@103.149.177.249:/tmp/webui_snap.db staging/webui_history.db
             
@@ -90,7 +86,6 @@ jobs:
           # 2. Backup Corpus DB (Full master)
           if [ "$TARGET" = "all" ] || [ "$TARGET" = "corpus_only" ]; then
             echo "==> [2] Pulling corpus.db from mahastore (Zero CPU compression on VPS)..."
-            # Raw wire transfer (tanpa flag -z) agar mahastore 0% CPU
             rsync -e "ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no" -avP \
               zidan@103.149.177.249:/home/zidan/projects/islamic-shamela-agent/data/sqlite/corpus.db staging/corpus.db
 
@@ -104,40 +99,60 @@ jobs:
           echo "==> Generated Encrypted Vault Files:"
           ls -lh out/
 
-      - name: Upload & Prune on Google Drive (Primary Storage)
+      - name: Prune Old Backups & Upload to Google Drive
         run: |
-          echo "==> Uploading & Enforcing Retention Policy on Google Drive..."
+          echo "==> Enforcing Retention Policy & Uploading to Google Drive..."
 
-          # 1. Upload & Retention untuk User History (Keep Max 5 Terbaru)
+          python3 -c '
+          import subprocess, sys
+
+          def prune_remote(remote_dir, keep_count):
+              try:
+                  out = subprocess.check_output(["rclone", "lsf", remote_dir, "--format", "tp"], text=True)
+              except Exception as e:
+                  print(f"Directory {remote_dir} may not exist yet, skipping prune: {e}")
+                  return
+              
+              entries = []
+              for line in out.splitlines():
+                  line = line.strip()
+                  if not line or ";" not in line:
+                      continue
+                  parts = line.split(";", 1)
+                  entries.append((parts[0].strip(), parts[1].strip()))
+              
+              # Urutkan dari terbaru ke terlama berdasarkan modtime
+              entries.sort(key=lambda x: x[0], reverse=True)
+              
+              # Jika melebihi keep_count, hapus sisanya
+              if len(entries) > keep_count:
+                  to_delete = entries[keep_count:]
+                  for ts, fname in to_delete:
+                      print(f"    [Prune] Menghapus backup lama: {fname} (modtime: {ts})")
+                      subprocess.run(["rclone", "deletefile", f"{remote_dir}/{fname}"], check=False)
+              else:
+                  print(f"    [Prune] File di {remote_dir} ada {len(entries)}, belum melewati batas {keep_count}.")
+
+          # 1. Prune User History (Sisakan 5 existing sebelum upload -> total jadi 6)
+          print("Checking retention for user_history (keep max 5 existing)...")
+          prune_remote("gdrive-ira:IslamicAgent_Backups/user_history", 5)
+
+          # 2. Prune Corpus Master (Sisakan 1 existing sebelum upload -> total jadi 2)
+          print("Checking retention for corpus_master (keep max 1 existing)...")
+          prune_remote("gdrive-ira:IslamicAgent_Backups/corpus_master", 1)
+          '
+
+          # Upload File Baru
           if [ -f out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
+            echo "==> Uploading new user history backup..."
             rclone copyto out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/user_history/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg --stats 5s
-
-            echo "    Enforcing retention: keeping latest 5 backups in user_history..."
-            FILES_TO_DELETE=$(rclone lsf gdrive-ira:IslamicAgent_Backups/user_history/ --format "tp" | sort -r | cut -c20- | tail -n +6 || true)
-            if [ -n "$FILES_TO_DELETE" ]; then
-              while IFS= read -r f; do
-                [ -z "$f" ] && continue
-                echo "    Deleting old user backup: $f"
-                rclone deletefile "gdrive-ira:IslamicAgent_Backups/user_history/$f"
-              done <<< "$FILES_TO_DELETE"
-            fi
           fi
 
-          # 2. Upload & Retention untuk Corpus (Keep Max 1 Terbaru)
           if [ -f out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
+            echo "==> Uploading new corpus master backup..."
             rclone copyto out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/corpus_master/corpus_${{ env.TIMESTAMP }}.db.zst.gpg --stats 5s
-
-            echo "    Enforcing retention: keeping latest 1 backup in corpus_master..."
-            CORPUS_TO_DELETE=$(rclone lsf gdrive-ira:IslamicAgent_Backups/corpus_master/ --format "tp" | sort -r | cut -c20- | tail -n +2 || true)
-            if [ -n "$CORPUS_TO_DELETE" ]; then
-              while IFS= read -r f; do
-                [ -z "$f" ] && continue
-                echo "    Deleting old corpus backup: $f"
-                rclone deletefile "gdrive-ira:IslamicAgent_Backups/corpus_master/$f"
-              done <<< "$CORPUS_TO_DELETE"
-            fi
           fi
 
-          echo "[+] Google Drive sync and retention pruning finished successfully!"
+          echo "[+] Sync and upload completed successfully!"
