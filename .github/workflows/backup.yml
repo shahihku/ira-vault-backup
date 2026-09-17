@@ -2,8 +2,8 @@ name: Islamic Agent Remote Zero-Load Backup
 
 on:
   schedule:
-    # 1. Backup User DB Harian: Tiap hari jam 03:00 WIB (20:00 UTC)
-    - cron: '0 20 * * *'
+    # Backup User DB tiap 6 jam: 03:00, 09:00, 15:00, 21:00 WIB (20:00, 02:00, 08:00, 14:00 UTC)
+    - cron: '0 2,8,14,20 * * *'
   workflow_dispatch:
     inputs:
       target:
