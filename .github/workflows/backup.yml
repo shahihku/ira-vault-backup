@@ -2,25 +2,23 @@ name: Islamic Agent Remote Zero-Load Backup
 
 on:
   schedule:
-    # Jalan otomatis tiap hari Minggu jam 03:00 WIB (20:00 UTC)
-    - cron: '0 20 * * 0'
+    # 1. Backup User DB Harian: Tiap hari jam 03:00 WIB (20:00 UTC)
+    - cron: '0 20 * * *'
   workflow_dispatch:
     inputs:
       target:
         description: 'Pilih database yang ingin dibackup'
         required: true
-        default: 'all'
+        default: 'history_only'
         type: choice
         options:
-          - all
-          - corpus_only
           - history_only
+          - corpus_only
+          - all
 
 jobs:
   backup:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout Repo
@@ -42,6 +40,21 @@ jobs:
           
           sudo apt-get update -qq && sudo apt-get install -y zstd gnupg rsync rclone
 
+      - name: Determine Target
+        run: |
+          # Jika dipicu oleh jadwal CRON, default adalah 'history_only' (harian hemat bandwidth)
+          # Khusus hari Minggu (Day 7), backup 'all' (termasuk corpus mingguan)
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            DAY_OF_WEEK=$(date +%u)
+            if [ "$DAY_OF_WEEK" -eq 7 ]; then
+              echo "TARGET=all" >> $GITHUB_ENV
+            else
+              echo "TARGET=history_only" >> $GITHUB_ENV
+            fi
+          else
+            echo "TARGET=${{ inputs.target }}" >> $GITHUB_ENV
+          fi
+
       - name: Test SSH & Rclone Connection
         run: |
           ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no zidan@103.149.177.249 "echo '[+] SSH Connection established successfully!'"
@@ -50,7 +63,6 @@ jobs:
       - name: Pull & Encrypt Database
         env:
           ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
-          TARGET: ${{ inputs.target || 'all' }}
         run: |
           mkdir -p staging out
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -72,11 +84,7 @@ jobs:
             zstd -6 -T0 staging/webui_history.db -o staging/webui_history.db.zst
             gpg --batch --yes --passphrase "$ENCRYPTION_KEY" --symmetric --cipher-algo AES256 \
               -o out/webui_history_${TIMESTAMP}.db.zst.gpg staging/webui_history.db.zst
-            
-            # Simpan juga versi plaintext .zst murni untuk Google Drive pribadi jika mau,
-            # atau simpan versi .zst.gpg di Google Drive agar aman 100%
-            cp out/webui_history_${TIMESTAMP}.db.zst.gpg staging/
-            rm -f staging/webui_history.db staging/webui_history.db.zst
+            rm -f staging/webui_history*
           fi
 
           # 2. Backup Corpus DB (Full master)
@@ -90,40 +98,46 @@ jobs:
             zstd -6 -T0 staging/corpus.db -o staging/corpus.db.zst
             gpg --batch --yes --passphrase "$ENCRYPTION_KEY" --symmetric --cipher-algo AES256 \
               -o out/corpus_${TIMESTAMP}.db.zst.gpg staging/corpus.db.zst
-            
-            cp out/corpus_${TIMESTAMP}.db.zst.gpg staging/
-            rm -f staging/corpus.db staging/corpus.db.zst
+            rm -f staging/corpus*
           fi
 
           echo "==> Generated Encrypted Vault Files:"
           ls -lh out/
 
-      - name: Upload to Google Drive (Zero Load on VPS)
-        env:
-          TARGET: ${{ inputs.target || 'all' }}
+      - name: Upload & Prune on Google Drive (Primary Storage)
         run: |
-          echo "==> Uploading files to Google Drive (gdrive-ira:IslamicAgent_Backups)..."
+          echo "==> Uploading & Enforcing Retention Policy on Google Drive..."
+
+          # 1. Upload & Retention untuk User History (Keep Max 5 Terbaru)
           if [ -f out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
             rclone copyto out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/user_history/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg --stats 5s
+
+            echo "    Enforcing retention: keeping latest 5 backups in user_history..."
+            FILES_TO_DELETE=$(rclone lsf gdrive-ira:IslamicAgent_Backups/user_history/ --format "tp" | sort -r | cut -c20- | tail -n +6 || true)
+            if [ -n "$FILES_TO_DELETE" ]; then
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                echo "    Deleting old user backup: $f"
+                rclone deletefile "gdrive-ira:IslamicAgent_Backups/user_history/$f"
+              done <<< "$FILES_TO_DELETE"
+            fi
           fi
-          
+
+          # 2. Upload & Retention untuk Corpus (Keep Max 1 Terbaru)
           if [ -f out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
             rclone copyto out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/corpus_master/corpus_${{ env.TIMESTAMP }}.db.zst.gpg --stats 5s
-          fi
-          echo "[+] Upload to Google Drive finished successfully!"
 
-      - name: Upload to GitHub Release (Immutable Vault)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "backup-${{ env.TIMESTAMP }}"
-          name: "Automated Encrypted Vault: ${{ env.TIMESTAMP }}"
-          body: |
-            Automated Encrypted Backup generated by GitHub Actions.
-            - Files are encrypted using AES-256 (GPG symmetric).
-            - Unreadable by public without `BACKUP_ENCRYPTION_KEY`.
-            - Synced to Google Drive & GitHub Releases.
-            - Zero load on Mahastore host during compression & upload.
-          files: out/*
-          fail_on_unmatched_files: true
+            echo "    Enforcing retention: keeping latest 1 backup in corpus_master..."
+            CORPUS_TO_DELETE=$(rclone lsf gdrive-ira:IslamicAgent_Backups/corpus_master/ --format "tp" | sort -r | cut -c20- | tail -n +2 || true)
+            if [ -n "$CORPUS_TO_DELETE" ]; then
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                echo "    Deleting old corpus backup: $f"
+                rclone deletefile "gdrive-ira:IslamicAgent_Backups/corpus_master/$f"
+              done <<< "$CORPUS_TO_DELETE"
+            fi
+          fi
+
+          echo "[+] Google Drive sync and retention pruning finished successfully!"
