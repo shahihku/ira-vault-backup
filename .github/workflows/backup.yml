@@ -103,14 +103,15 @@ jobs:
         run: |
           echo "==> Enforcing Retention Policy & Uploading to Google Drive..."
 
-          python3 -c '
+          python3 -u -c '
           import subprocess, sys
 
           def prune_remote(remote_dir, keep_count):
+              print(f"--> Listing {remote_dir}...", flush=True)
               try:
                   out = subprocess.check_output(["rclone", "lsf", remote_dir, "--format", "tp"], text=True)
               except Exception as e:
-                  print(f"Directory {remote_dir} may not exist yet, skipping prune: {e}")
+                  print(f"Directory {remote_dir} may not exist yet, skipping prune: {e}", flush=True)
                   return
               
               entries = []
@@ -121,38 +122,38 @@ jobs:
                   parts = line.split(";", 1)
                   entries.append((parts[0].strip(), parts[1].strip()))
               
-              # Urutkan dari terbaru ke terlama berdasarkan modtime
               entries.sort(key=lambda x: x[0], reverse=True)
               
-              # Jika melebihi keep_count, hapus sisanya
               if len(entries) > keep_count:
                   to_delete = entries[keep_count:]
                   for ts, fname in to_delete:
-                      print(f"    [Prune] Menghapus backup lama: {fname} (modtime: {ts})")
+                      print(f"    [Prune] Menghapus backup lama: {fname} (modtime: {ts})", flush=True)
                       subprocess.run(["rclone", "deletefile", f"{remote_dir}/{fname}"], check=False)
               else:
-                  print(f"    [Prune] File di {remote_dir} ada {len(entries)}, belum melewati batas {keep_count}.")
+                  print(f"    [Prune] File di {remote_dir} ada {len(entries)}, belum melewati batas {keep_count}.", flush=True)
 
           # 1. Prune User History (Sisakan 5 existing sebelum upload -> total jadi 6)
-          print("Checking retention for user_history (keep max 5 existing)...")
+          print("Checking retention for user_history (keep max 5 existing)...", flush=True)
           prune_remote("gdrive-ira:IslamicAgent_Backups/user_history", 5)
 
           # 2. Prune Corpus Master (Sisakan 1 existing sebelum upload -> total jadi 2)
-          print("Checking retention for corpus_master (keep max 1 existing)...")
+          print("Checking retention for corpus_master (keep max 1 existing)...", flush=True)
           prune_remote("gdrive-ira:IslamicAgent_Backups/corpus_master", 1)
           '
 
-          # Upload File Baru
+          # Upload File Baru dengan chunk size optimal (64M) dan print progress (-P)
           if [ -f out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
             echo "==> Uploading new user history backup..."
             rclone copyto out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg \
-              gdrive-ira:IslamicAgent_Backups/user_history/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg --stats 5s
+              gdrive-ira:IslamicAgent_Backups/user_history/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg \
+              --drive-chunk-size 64M -P
           fi
 
           if [ -f out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
             echo "==> Uploading new corpus master backup..."
             rclone copyto out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
-              gdrive-ira:IslamicAgent_Backups/corpus_master/corpus_${{ env.TIMESTAMP }}.db.zst.gpg --stats 5s
+              gdrive-ira:IslamicAgent_Backups/corpus_master/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
+              --drive-chunk-size 64M -P
           fi
 
           echo "[+] Sync and upload completed successfully!"
