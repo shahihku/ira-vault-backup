@@ -32,7 +32,7 @@ jobs:
           mkdir -p ~/.ssh ~/.config/rclone
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p 2703 103.149.177.249 >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -p 2798 103.102.152.37 >> ~/.ssh/known_hosts 2>/dev/null || true
           
           echo "$RCLONE_CONFIG_DATA" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
@@ -41,9 +41,13 @@ jobs:
 
       - name: Determine Target
         run: |
+          # Jika dipicu jadwal CRON:
+          # - Default tiap 6 jam: 'history_only'
+          # - Khusus hari Minggu jam 03:00 WIB (Day 7, UTC 20:00): 'all' (termasuk corpus mingguan)
           if [ "${{ github.event_name }}" = "schedule" ]; then
             DAY_OF_WEEK=$(date +%u)
-            if [ "$DAY_OF_WEEK" -eq 7 ]; then
+            HOUR_UTC=$(date +%H)
+            if [ "$DAY_OF_WEEK" -eq 7 ] && [ "$HOUR_UTC" = "20" ]; then
               echo "TARGET=all" >> $GITHUB_ENV
             else
               echo "TARGET=history_only" >> $GITHUB_ENV
@@ -54,7 +58,7 @@ jobs:
 
       - name: Test SSH & Rclone Connection
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no zidan@103.149.177.249 "echo '[+] SSH Connection established successfully!'"
+          ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 "echo '[+] SSH Connection established successfully to Qwords2!'"
           rclone about gdrive-ira:
 
       - name: Pull & Encrypt Database
@@ -67,14 +71,14 @@ jobs:
 
           # 1. Backup User History DB
           if [ "$TARGET" = "all" ] || [ "$TARGET" = "history_only" ]; then
-            echo "==> [1] Pulling webui_history.db from mahastore..."
-            ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no zidan@103.149.177.249 \
-              "python3 -c \"import sqlite3; src=sqlite3.connect('file:/home/zidan/projects/islamic-shamela-agent/data/webui_history.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/webui_snap.db'); src.backup(dst); src.close(); dst.close()\""
+            echo "==> [1] Pulling webui_history.db from qwords2..."
+            ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 \
+              "python3 -c \"import sqlite3; src=sqlite3.connect('file:/home/zidan/apps/islamic-agent/data/webui_history.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/webui_snap.db'); src.backup(dst); src.close(); dst.close()\""
             
-            rsync -e "ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no" -avP \
-              zidan@103.149.177.249:/tmp/webui_snap.db staging/webui_history.db
+            rsync -e "ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no" -avP \
+              zidan@103.102.152.37:/tmp/webui_snap.db staging/webui_history.db
             
-            ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no zidan@103.149.177.249 "rm -f /tmp/webui_snap.db"
+            ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 "rm -f /tmp/webui_snap.db"
 
             echo "==> Compressing & Encrypting User History on GitHub Runner..."
             zstd -6 -T0 staging/webui_history.db -o staging/webui_history.db.zst
@@ -85,9 +89,9 @@ jobs:
 
           # 2. Backup Corpus DB (Full master)
           if [ "$TARGET" = "all" ] || [ "$TARGET" = "corpus_only" ]; then
-            echo "==> [2] Pulling corpus.db from mahastore (Zero CPU compression on VPS)..."
-            rsync -e "ssh -i ~/.ssh/id_ed25519 -p 2703 -o StrictHostKeyChecking=no" -avP \
-              zidan@103.149.177.249:/home/zidan/projects/islamic-shamela-agent/data/sqlite/corpus.db staging/corpus.db
+            echo "==> [2] Pulling corpus.db from qwords2 (Zero CPU compression on VPS)..."
+            rsync -e "ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no" -avP \
+              zidan@103.102.152.37:/home/zidan/apps/islamic-agent/data/sqlite/corpus.db staging/corpus.db
 
             echo "==> Compressing & Encrypting Corpus DB on GitHub Runner (Balanced fast zstd -6)..."
             zstd -6 -T0 staging/corpus.db -o staging/corpus.db.zst
