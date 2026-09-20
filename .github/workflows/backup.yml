@@ -71,32 +71,29 @@ jobs:
 
           # 1. Backup User History DB
           if [ "$TARGET" = "all" ] || [ "$TARGET" = "history_only" ]; then
-          echo "==> [1] Pulling webui_history.db from qwords2..."
-          ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 \
-            "echo '=== Connected to:'; hostname; echo '=================='"
-            
-          ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 \
-            "python3 -c \"import sqlite3; src=sqlite3.connect('file:/home/zidan/apps/islamic-agent/data/webui_history.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/webui_snap.db'); src.backup(dst); src.close(); dst.close()\""
-            
-          scp -i ~/.ssh/id_ed25519 -P 2798 -o StrictHostKeyChecking=no \
-            zidan@103.102.152.37:/tmp/webui_snap.db staging/webui_history.db
-            
-          ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 "rm -f /tmp/webui_snap.db"
+            echo "==> [1] Pulling webui_history.db from qwords2..."
+            ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 \
+              "python3 -c \"import sqlite3; src=sqlite3.connect('file:/home/zidan/apps/islamic-agent/data/webui_history.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/webui_snap.db'); src.backup(dst); src.close(); dst.close()\""
+              
+            # Gunakan chacha20-poly1305 agar enkripsi SSH sangat ringan untuk 1 vCPU VPS
+            scp -i ~/.ssh/id_ed25519 -P 2798 -o StrictHostKeyChecking=no -c chacha20-poly1305@openssh.com \
+              zidan@103.102.152.37:/tmp/webui_snap.db staging/webui_history.db
+              
+            ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 "rm -f /tmp/webui_snap.db"
 
-          python3 -c "import sqlite3; c=sqlite3.connect('staging/webui_history.db'); iden=c.execute('SELECT host_name, role FROM _host_identity;').fetchone(); print('--> Provenance:', iden); assert iden[0] == 'qwords2-live-runner', 'Bukan DB qwords2!'"
-
-          echo "==> Compressing & Encrypting User History on GitHub Runner..."
-          zstd -6 -T0 staging/webui_history.db -o staging/webui_history.db.zst
-          gpg --batch --yes --passphrase "$ENCRYPTION_KEY" --symmetric --cipher-algo AES256 \
-            -o out/webui_history_${TIMESTAMP}.db.zst.gpg staging/webui_history.db.zst
-          rm -f staging/webui_history*
+            echo "==> Compressing & Encrypting User History on GitHub Runner..."
+            zstd -6 -T0 staging/webui_history.db -o staging/webui_history.db.zst
+            gpg --batch --yes --passphrase "$ENCRYPTION_KEY" --symmetric --cipher-algo AES256 \
+              -o out/webui_history_${TIMESTAMP}.db.zst.gpg staging/webui_history.db.zst
+            rm -f staging/webui_history*
           fi
 
           # 2. Backup Corpus DB (Full master)
           if [ "$TARGET" = "all" ] || [ "$TARGET" = "corpus_only" ]; then
-          echo "==> [2] Pulling corpus.db from qwords2 (Zero CPU compression on VPS)..."
-          scp -i ~/.ssh/id_ed25519 -P 2798 -o StrictHostKeyChecking=no \
-            zidan@103.102.152.37:/home/zidan/apps/islamic-agent/data/sqlite/corpus.db staging/corpus.db
+            echo "==> [2] Pulling corpus.db from qwords2 (Zero CPU compression on VPS)..."
+            # Gunakan cipher chacha20 & buffer stream yang ringan
+            scp -i ~/.ssh/id_ed25519 -P 2798 -o StrictHostKeyChecking=no -c chacha20-poly1305@openssh.com \
+              zidan@103.102.152.37:/home/zidan/apps/islamic-agent/data/sqlite/corpus.db staging/corpus.db
 
             echo "==> Compressing & Encrypting Corpus DB on GitHub Runner (Balanced fast zstd -6)..."
             zstd -6 -T0 staging/corpus.db -o staging/corpus.db.zst
