@@ -14,6 +14,7 @@ on:
         options:
           - history_only
           - corpus_only
+          - jawami_only
           - all
 
 jobs:
@@ -27,12 +28,14 @@ jobs:
       - name: Setup SSH, Rclone & Dependencies
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
           RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
         run: |
           mkdir -p ~/.ssh ~/.config/rclone
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p 2798 103.102.152.37 >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
           
           echo "$RCLONE_CONFIG_DATA" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
@@ -43,7 +46,7 @@ jobs:
         run: |
           # Jika dipicu jadwal CRON:
           # - Default tiap 6 jam: 'history_only'
-          # - Khusus hari Minggu jam 03:00 WIB (Day 7, UTC 20:00): 'all' (termasuk corpus mingguan)
+          # - Khusus hari Minggu jam 03:00 WIB (Day 7, UTC 20:00): 'all' (termasuk corpus & jawami mingguan)
           if [ "${{ github.event_name }}" = "schedule" ]; then
             DAY_OF_WEEK=$(date +%u)
             HOUR_UTC=$(date +%H)
@@ -57,12 +60,19 @@ jobs:
           fi
 
       - name: Test SSH & Rclone Connection
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 "echo '[+] SSH Connection established successfully to Qwords2!'"
+          ssh -i ~/.ssh/id_ed25519 -p "$SSH_PORT" -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" "echo '[+] Remote SSH Connection established successfully!'"
           rclone about gdrive-ira:
 
       - name: Pull & Encrypt Database
         env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
           ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
         run: |
           mkdir -p staging out
@@ -71,15 +81,15 @@ jobs:
 
           # 1. Backup User History DB
           if [ "$TARGET" = "all" ] || [ "$TARGET" = "history_only" ]; then
-            echo "==> [1] Pulling webui_history.db from qwords2..."
-            ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 \
-              "python3 -c \"import sqlite3; src=sqlite3.connect('file:/home/zidan/apps/islamic-agent/data/webui_history.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/webui_snap.db'); src.backup(dst); src.close(); dst.close()\""
+            echo "==> [1] Pulling webui_history.db from remote host..."
+            ssh -i ~/.ssh/id_ed25519 -p "$SSH_PORT" -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" \
+              "python3 -c \"import sqlite3; src=sqlite3.connect('file:/home/$SSH_USER/apps/islamic-agent/data/webui_history.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/webui_snap.db'); src.backup(dst); src.close(); dst.close()\""
               
-            # Gunakan chacha20-poly1305 agar enkripsi SSH sangat ringan untuk 1 vCPU VPS
-            scp -i ~/.ssh/id_ed25519 -P 2798 -o StrictHostKeyChecking=no -c chacha20-poly1305@openssh.com \
-              zidan@103.102.152.37:/tmp/webui_snap.db staging/webui_history.db
+            # Gunakan chacha20-poly1305 agar enkripsi SSH sangat ringan untuk CPU VPS
+            scp -i ~/.ssh/id_ed25519 -P "$SSH_PORT" -o StrictHostKeyChecking=no -c chacha20-poly1305@openssh.com \
+              "$SSH_USER@$SSH_HOST":/tmp/webui_snap.db staging/webui_history.db
               
-            ssh -i ~/.ssh/id_ed25519 -p 2798 -o StrictHostKeyChecking=no zidan@103.102.152.37 "rm -f /tmp/webui_snap.db"
+            ssh -i ~/.ssh/id_ed25519 -p "$SSH_PORT" -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" "rm -f /tmp/webui_snap.db"
 
             echo "==> Compressing & Encrypting User History on GitHub Runner..."
             zstd -6 -T0 staging/webui_history.db -o staging/webui_history.db.zst
@@ -90,16 +100,29 @@ jobs:
 
           # 2. Backup Corpus DB (Full master)
           if [ "$TARGET" = "all" ] || [ "$TARGET" = "corpus_only" ]; then
-            echo "==> [2] Pulling corpus.db from qwords2 (Zero CPU compression on VPS)..."
+            echo "==> [2] Pulling corpus.db from remote host (Zero CPU compression on VPS)..."
             # Gunakan cipher chacha20 & buffer stream yang ringan
-            scp -i ~/.ssh/id_ed25519 -P 2798 -o StrictHostKeyChecking=no -c chacha20-poly1305@openssh.com \
-              zidan@103.102.152.37:/home/zidan/apps/islamic-agent/data/sqlite/corpus.db staging/corpus.db
+            scp -i ~/.ssh/id_ed25519 -P "$SSH_PORT" -o StrictHostKeyChecking=no -c chacha20-poly1305@openssh.com \
+              "$SSH_USER@$SSH_HOST":/home/$SSH_USER/apps/islamic-agent/data/sqlite/corpus.db staging/corpus.db
 
-            echo "==> Compressing & Encrypting Corpus DB on GitHub Runner (Balanced fast zstd -6)..."
+            echo "==> Compressing & Encrypting Corpus DB on GitHub Runner (Balanced fast zstd -6)......"
             zstd -6 -T0 staging/corpus.db -o staging/corpus.db.zst
             gpg --batch --yes --passphrase "$ENCRYPTION_KEY" --symmetric --cipher-algo AES256 \
               -o out/corpus_${TIMESTAMP}.db.zst.gpg staging/corpus.db.zst
             rm -f staging/corpus*
+          fi
+
+          # 3. Backup Jawami DB (Hadith & Rijal DB)
+          if [ "$TARGET" = "all" ] || [ "$TARGET" = "jawami_only" ]; then
+            echo "==> [3] Pulling jawami_v4.db from remote host (Zero CPU compression on VPS)..."
+            scp -i ~/.ssh/id_ed25519 -P "$SSH_PORT" -o StrictHostKeyChecking=no -c chacha20-poly1305@openssh.com \
+              "$SSH_USER@$SSH_HOST":/home/$SSH_USER/apps/islamic-agent/data/raw/jawami_v4.db staging/jawami_v4.db
+
+            echo "==> Compressing & Encrypting Jawami DB on GitHub Runner (Balanced fast zstd -6)..."
+            zstd -6 -T0 staging/jawami_v4.db -o staging/jawami_v4.db.zst
+            gpg --batch --yes --passphrase "$ENCRYPTION_KEY" --symmetric --cipher-algo AES256 \
+              -o out/jawami_v4_${TIMESTAMP}.db.zst.gpg staging/jawami_v4.db.zst
+            rm -f staging/jawami_v4*
           fi
 
           echo "==> Generated Encrypted Vault Files:"
@@ -145,6 +168,10 @@ jobs:
           # 2. Prune Corpus Master (Sisakan 1 existing sebelum upload -> total jadi 2)
           print("Checking retention for corpus_master (keep max 1 existing)...", flush=True)
           prune_remote("gdrive-ira:IslamicAgent_Backups/corpus_master", 1)
+
+          # 3. Prune Jawami Master (Sisakan 1 existing sebelum upload -> total jadi 2)
+          print("Checking retention for jawami_master (keep max 1 existing)...", flush=True)
+          prune_remote("gdrive-ira:IslamicAgent_Backups/jawami_master", 1)
           '
 
           # Upload File Baru dengan chunk size optimal (64M) dan print progress (-P)
@@ -159,6 +186,13 @@ jobs:
             echo "==> Uploading new corpus master backup..."
             rclone copyto out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/corpus_master/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
+              --drive-chunk-size 64M -P
+          fi
+
+          if [ -f out/jawami_v4_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
+            echo "==> Uploading new jawami master backup..."
+            rclone copyto out/jawami_v4_${{ env.TIMESTAMP }}.db.zst.gpg \
+              gdrive-ira:IslamicAgent_Backups/jawami_master/jawami_v4_${{ env.TIMESTAMP }}.db.zst.gpg \
               --drive-chunk-size 64M -P
           fi
 
