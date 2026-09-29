@@ -174,26 +174,26 @@ jobs:
           prune_remote("gdrive-ira:IslamicAgent_Backups/jawami_master", 1)
           '
 
-          # Upload File Baru dengan chunk size optimal (64M) dan print progress (-P)
+          # Upload File Baru dengan chunk size optimal (64M), rate limiter anti-403, dan print progress (-P)
           if [ -f out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
             echo "==> Uploading new user history backup..."
             rclone copyto out/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/user_history/webui_history_${{ env.TIMESTAMP }}.db.zst.gpg \
-              --drive-chunk-size 64M -P
+              --drive-chunk-size 64M --tpslimit 8 --retries 5 --low-level-retries 10 -P
           fi
 
           if [ -f out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
             echo "==> Uploading new corpus master backup..."
             rclone copyto out/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/corpus_master/corpus_${{ env.TIMESTAMP }}.db.zst.gpg \
-              --drive-chunk-size 64M -P
+              --drive-chunk-size 64M --tpslimit 8 --retries 5 --low-level-retries 10 -P
           fi
 
           if [ -f out/jawami_v4_${{ env.TIMESTAMP }}.db.zst.gpg ]; then
             echo "==> Uploading new jawami master backup..."
             rclone copyto out/jawami_v4_${{ env.TIMESTAMP }}.db.zst.gpg \
               gdrive-ira:IslamicAgent_Backups/jawami_master/jawami_v4_${{ env.TIMESTAMP }}.db.zst.gpg \
-              --drive-chunk-size 64M -P
+              --drive-chunk-size 64M --tpslimit 8 --retries 5 --low-level-retries 10 -P
           fi
 
           echo "[+] Sync and upload completed successfully!"
